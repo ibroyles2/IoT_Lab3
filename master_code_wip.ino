@@ -1,171 +1,208 @@
- #include <SPI.h>
+  #define CPU_HZ 48000000
+  #define TIMER_PRESCALER_DIV 1024
+
+  void startTimer4(int frequencyHz);
+  void setTimer4Frequency(int frequencyHz);
+  void TC4_Handler();
+
+  #include <SPI.h>
+  
+  //Radio Head Library:
+  #include <RH_RF95.h>
+  
+  // We need to provide the RFM95 module's chip select and interrupt pins to the
+  // rf95 instance below.On the SparkFun ProRF those pins are 12 and 6 respectively.
+  RH_RF95 rf95(12, 6);
+  
+  int LED = 13; //Status LED is on pin 13
+  
+  int packetCounter = 0; //Counts the number of packets sent
+  long timeSinceLastPacket = 0; //Tracks the time stamp of last packet received
+  
+  // The broadcast frequency is set to 921.2, but the SADM21 ProRf operates
+  // anywhere in the range of 902-928MHz in the Americas.
+  // Europe operates in the frequencies 863-870, center frequency at 868MHz.
+  // This works but it is unknown how well the radio configures to this frequency:
+  float frequency = 914; //Broadcast frequency
+  int sec = 0;
+
+  // legend:
+  // hung 1, Kranav 2, Kareem 3, Jacob 4
+
+  void setup() { 
+    // Setup General Clock Generator 2
+
+    GCLK->GENDIV.bit.ID = 0x2;                // select clock generator 2
+    while (GCLK->STATUS.bit.SYNCBUSY == 1);   
+    GCLK->GENDIV.bit.DIV = 0x0020;            // set division factor of clock generator 2 to 16, using bits 8-12. 
+    while (GCLK->STATUS.bit.SYNCBUSY == 1);
     
-//Radio Head Library:
-#include <RH_RF95.h>
-#include <TemperatureZero.h>
+    GCLK->GENCTRL.bit.ID = 0x2;               // set clock to conifgure to clock generator 2
+    while (GCLK->STATUS.bit.SYNCBUSY == 1);
+    GCLK->GENCTRL.bit.GENEN = 0x1;            // enable clock generator
+    while (GCLK->STATUS.bit.SYNCBUSY == 1);
+    GCLK->GENCTRL.bit.SRC = 0x03;             // set clock source to (ULP Oscillator)
+    while (GCLK->STATUS.bit.SYNCBUSY == 1);
+    GCLK->GENCTRL.bit.DIVSEL = 0;             // set division style of clock to: clock freq / division factor
+    while (GCLK->STATUS.bit.SYNCBUSY == 1);
 
-# define CPU_HZ 48000000
-# define TIMER_PRESCALER_DIV 512
+    GCLK->CLKCTRL.bit.ID = 0x03;              // set clock to WDT's clock, so that the WDT will use it
+    while (GCLK->STATUS.bit.SYNCBUSY == 1);
+    GCLK->CLKCTRL.bit.GEN = 0x2;              // selected clock generator 2
+    while (GCLK->STATUS.bit.SYNCBUSY == 1);
+    GCLK->CLKCTRL.bit.CLKEN = 0x1;            // enabled clock
+    while (GCLK->STATUS.bit.SYNCBUSY == 1);
+    
 
-void startTimer(int frequencyHz);
-void setTimerFrequency(int frequencyHz);
-void TC3_Handler();
+    // Setup WDT with a period of 2 seconds
+    // also setting up WDT Early Warning Interrupt
+    WDT->CONFIG.bit.PER = 0xB;                // set timeout period of WDT to 4096 cycles (~2 seconds)
+    while (WDT->STATUS.bit.SYNCBUSY == 1);
 
-TemperatureZero TempZero = TemperatureZero();
-RH_RF95 rf95(12, 6);
+    WDT->EWCTRL.bit.EWOFFSET = 0x6;           // set WDT EW offset to 512 cycles (1/4 second)
+    while (WDT->STATUS.bit.SYNCBUSY == 1);
 
-float frequency = 14;
-int packetCounter = 0;
-int timerCounter = 0; // increments up to 5 by interupt handler, then reset
-float temperatureArray[5];
+    WDT->INTENSET.bit.EW = 0x1;               // enable WDT Early Warning interrupt
+    
+    while (WDT->STATUS.bit.SYNCBUSY == 1);
+    WDT->CTRL.bit.ENABLE = 0x1;               // enabled WDT
+    while (WDT->STATUS.bit.SYNCBUSY == 1);
 
-void setup() {
-  // put your setup code here, to run once:
-  Serial.begin(9600);
-  TempZero.init();
-  while(!SerialUSB)
-  pinMode(PIN_LED_13, OUTPUT);
-  startTimer(1);
+    
+    // put your setup code here, to run once:
+    NVIC_EnableIRQ(WDT_IRQn);
+    SerialUSB.begin(9600);
+    while(!SerialUSB);
+    startTimer4(1);
 
-  if (rf95.init() == false) {
-    SerialUSB.println("Radio Init Failed - Freezing");
-    while (1);
-  } else {
-    SerialUSB.println("Transmitter up!");
-    digitalWrite(PIN_LED_13, HIGH);
-    delay(500);
-    digitalWrite(PIN_LED_13, LOW);
-    delay(500);
+
+    //Initialize the Radio.
+        if (rf95.init() == false) {
+          SerialUSB.println("Radio Init Failed - Freezing");
+          while (1);
+        }
+        else {
+          //An LED inidicator to let us know radio initialization has completed.
+          SerialUSB.println("Receiver up!");
+        }
+      
+        // Set frequency
+          rf95.setFrequency(frequency);
+      
+        // Transmitter power can range from 14-20dbm.
+        rf95.setTxPower(14, true);
   }
 
-  rf95.setFrequency(frequency);
+
+  void loop() {
+
+    if (rf95.available()){
+        // Should be a message for us now
+        uint8_t buf[RH_RF95_MAX_MESSAGE_LEN];
+        uint8_t len = sizeof(buf);
     
-  // Transmitter power can range from 14-20dbm.
-  // Since we're close together, we can use the lowest value (14)
-  rf95.setTxPower(14, false);
-}
+        if (rf95.recv(buf, &len)){
+          digitalWrite(LED, HIGH); //Turn on status LED
+          timeSinceLastPacket = millis(); //Timestamp this packet
+    
+          SerialUSB.print("Got message: ");
+          SerialUSB.print((char*)buf);
+          SerialUSB.print(" RSSI: ");
+          SerialUSB.print(rf95.lastRssi(), DEC);
+          SerialUSB.println();
 
-void loop() {
-  // put your main code here, to run repeatedly:
+         rf95.setTxPower(14, false);              // set this to false so that we can send messages
+         // Send a reply
+                      // set this to true so that we can receive messages
+    
+        }
+        else
+          SerialUSB.println("Recieve failed");
+      }
+      //Turn off status LED if we haven't received a packet after 1s
+      if(millis() - timeSinceLastPacket > 1000){
+        digitalWrite(LED, LOW); //Turn off status LED
+        timeSinceLastPacket = millis(); //Don't write LED but every 1s
+      }
 
-  // wait_for_permission_packet()
-  // send_temperature_packet()
-  // wait_for_confirmation_packet()
-
-  delay(1000);
-  digitalWrite(PIN_LED_13, HIGH);
-  float temperature = TempZero.readInternalTemperature();
-  // SerialUSB.print("Internal Temperature:");
-  // SerialUSB.println(temperature);
-  packetCounter = packetCounter + 1;
-  char* toSend;
-  sprintf(toSend, "I1,%d,%ld,%f", packetCounter, millis(), temperature);
-  // itoa(packetCounter, toSend + strlen(toSend), 10);
-  // itoa(timeSinceLastPacket, toSend + strlen(toSend), 10)
-
-  //Concatenate the packet counter value to the message
-  SerialUSB.println(toSend);
-  SerialUSB.println(packetCounter);
-  digitalWrite(PIN_LED_13, LOW);
-
-}
-
-void setTimerFrequency(int frequencyHz) {
-  int compareValue = (CPU_HZ / (TIMER_PRESCALER_DIV * frequencyHz)) - 1;
-  TcCount16* TC = (TcCount16*) TC3;
-  // Make sure the count is in a proportional position to where it was
-  // to prevent any jitter or disconnect when changing the compare value.
-  // map(value, fromLow, fromHigh, toLow, toHigh) takes a value in a range of [fromLow,fromHigh] to a value in a range of [toLow,toHigh]
-  TC->COUNT.reg = map(TC->COUNT.reg, 0, TC->CC[1].reg, 0, compareValue);
-  TC->CC[1].reg = compareValue;
-  while (TC->STATUS.bit.SYNCBUSY == 1);
-
-  SerialUSB.print("COUNT: ");
-  SerialUSB.println(TC->COUNT.reg);
-  while (TC->STATUS.bit.SYNCBUSY == 1);
-
-  SerialUSB.print("CC[1]: ");
-  SerialUSB.println(TC->CC[1].reg);
-}
-
-void startTimer (int frequencyHz) {
-  REG_GCLK_CLKCTRL = (uint16_t) (GCLK_CLKCTRL_CLKEN | 
-                                 GCLK_CLKCTRL_GEN_GCLK0 |
-                                 GCLK_CLKCTRL_ID_TC4_TC5) ;
-  while ( GCLK->STATUS.bit.SYNCBUSY == 1 ); // wait for sync
-
-  TcCount16* TC = (TcCount16*) TC4;
-  
-  TC->CTRLA.reg &= ~TC_CTRLA_ENABLE; //Disable timer
-  while (TC->STATUS.bit.SYNCBUSY == 1); // wait for sync
-  
-  // Use the 16-bit timer
-  TC->CTRLA.reg |= TC_CTRLA_MODE_COUNT16;
-  while (TC->STATUS.bit.SYNCBUSY == 1); // wait for sync
-
-  // Use match mode so that the timer counter resets when the count matches the compare register
-  TC->CTRLA.reg |= TC_CTRLA_WAVEGEN_MFRQ;
-  while (TC->STATUS.bit.SYNCBUSY == 1); // wait for sync
-
-  // Set prescaler to 1024
-  TC->CTRLA.reg |= TC_CTRLA_PRESCALER_DIV1024;
-  while (TC->STATUS.bit.SYNCBUSY == 1); // wait for sync
-
-  setTimerFrequency(frequencyHz);
-  
-  // Enable the compare interrupt
-  TC->INTENSET.reg = 0;
-  TC->INTENSET.bit.OVF = 1;
-  
-  NVIC_EnableIRQ(TC4_IRQn);
-  
-  TC->CTRLA.reg |= TC_CTRLA_ENABLE;
-  while (TC->STATUS.bit.SYNCBUSY == 1); // wait for sync
-}
-
-
-void TC3_handler() {
-  // every 5 seconds send permissions
-  // error codes: WDT, REC_FAIL ( reception failure ),
-  // do interrupt stuff:
-
-  // sending permission message :
-  float temperature = TempZero.readInternalTemperature();
-  temperatureArray[timerCounter] = temperature;
-  SerialUSB.print("Current temperature");
-  SerialUSB.println(temperature);
-
-  if (timerCounter > 4) {
-    packetCounter ++;
-    char* permissionPacket;
-    sprintf(permissionPacket, "p%d,I1,%ld,%2.2f", packetCounter, millis(), temperature);
-    // rf95.send((uint8_t *) &permissionPacket,sizeof(permissionPacket));
-    // rf95.waitPacketSent();
-    SerialUSB.println(permissionPacket);
-
-    // checks if packet was recieved:
-    if( 1 == 1 ) {
-      SerialUSB.println("Permission packet recieved by slave");
-      SerialUSB.println("Temperature packet recieved from slave");
-    }
-    timerCounter = 0;
-  } 
-  timerCounter++;
-  
-
-}
-
-float averageTemp(float* tempArray) {
-  float sumTemp = 0;
-  int size = sizeof(tempArray) / sizeof(float);
-  for (int i = 0; i < size; i++ ) {
-    sumTemp += tempArray[i];
   }
-  return sumTemp / size;
-}
 
-// void slave_node {
-//   // calc_temp()
-//   // check for confirmation signal
-//   // if no signal comes
-// }
+  void setTimer4Frequency(int frequencyHz) {
+    int compareValue = (CPU_HZ / (TIMER_PRESCALER_DIV * frequencyHz)) - 1;
+    TcCount16* TC = (TcCount16*) TC4;
+    // Make sure the count is in a proportional position to where it was
+    // to prevent any jitter or disconnect when changing the compare value.
+    // map(value, fromLow, fromHigh, toLow, toHigh) takes a value in a range of [fromLow,fromHigh] to a value in a range of [toLow,toHigh]
+    TC->COUNT.reg = map(TC->COUNT.reg, 0, TC->CC[0].reg, 0, compareValue);
+    TC->CC[0].reg = compareValue;
+    while (TC->STATUS.bit.SYNCBUSY == 1);
+    while (TC->STATUS.bit.SYNCBUSY == 1);
+  }
+
+
+
+  void startTimer4(int frequencyHz) {
+  REG_GCLK_CLKCTRL = (uint16_t)(GCLK_CLKCTRL_CLKEN | 
+                                GCLK_CLKCTRL_GEN_GCLK0 |
+                                GCLK_CLKCTRL_ID_TC4_TC5) ;
+    while ( GCLK->STATUS.bit.SYNCBUSY == 1 ); // wait for sync
+
+    TcCount16* TC = (TcCount16*) TC4;
+    
+    TC->CTRLA.reg &= ~TC_CTRLA_ENABLE; //Disable timer
+    while (TC->STATUS.bit.SYNCBUSY == 1); // wait for sync
+    
+    // Use the 16-bit timer
+    // Use match mode so that the timer counter resets when the count matches the compare register
+    // Set prescaler to 1024
+    TC->CTRLA.reg |= TC_CTRLA_MODE_COUNT16 | TC_CTRLA_WAVEGEN_MFRQ | TC_CTRLA_PRESCALER_DIV1024;
+    while (TC->STATUS.bit.SYNCBUSY == 1); // wait for sync
+
+    setTimer4Frequency(frequencyHz);
+    
+    // Enable the compare interrupt
+    TC->INTENSET.reg = 0;
+    TC->INTENSET.bit.MC0 = 1;
+    TC->INTENSET.bit.OVF = 1;
+    NVIC_EnableIRQ(TC4_IRQn);
+    
+    TC->CTRLA.reg |= TC_CTRLA_ENABLE;
+    while (TC->STATUS.bit.SYNCBUSY == 1); // wait for sync
+  }
+
+
+
+
+
+  // WDT EW Interrupt Handler
+  void WDT_Handler() {
+    WDT->INTFLAG.reg = WDT_INTFLAG_EW;
+    WDT->CLEAR.bit.CLEAR = 0xA5;
+  }
+
+  void TC4_Handler() {
+    TcCount16* TC = (TcCount16*) TC4;
+
+    if (TC->INTFLAG.bit.OVF == 1) {
+      TC->INTFLAG.bit.OVF = 1;
+      sec++;
+
+      char* toSend; 
+       
+      if (sec > 4) {
+        sec = 0;
+        rf95.setTxPower(14, false);
+        sprintf(toSend, "%c,%d,%c,%c,%ld", 'p',packetCounter,'m','1',millis());
+        SerialUSB.println(toSend);
+        rf95.send((uint8_t*)toSend, sizeof(toSend));
+        rf95.waitPacketSent();
+        SerialUSB.println("Sent a reply");
+        digitalWrite(LED, LOW); //Turn off status LED
+        rf95.setTxPower(14, true);
+        packetCounter += 1;
+      }
+      else {
+        SerialUSB.println(String(sec) + " seconds");
+      }
+    } 
+  }
