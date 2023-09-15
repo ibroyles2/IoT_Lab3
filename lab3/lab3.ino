@@ -1,17 +1,17 @@
-#include <TemperatureZero.h>
 #include "packet.h"
+#include <TemperatureZero.h>
 #include <SPI.h>
 #include <RH_RF95.h>
+#include "timer.h"
 
-#define CPU_HZ 48000000
 
-#define TIMER_PRESCALER_DIV 1024
-
-#define NODE_ID "h"
+#define MY_NODE "1";
 
 void startTimer(int frequencyHz);
 void setTimerFrequency(int frequencyHz);
 void TC4_Handler();
+
+
 
 RH_RF95 rf95(12, 6);
 
@@ -20,9 +20,10 @@ float sumTemp = 0.0;
 int tempCounter = 0;
 bool isSuccesful = true;
 
-
-String SUCCESSFULL_CODE = "s";
-String ERROR_CODE = "e";
+const int windowSize = 5;
+float data[windowSize];
+int dataIndex = 0;
+float average_temperature = 0.0;
 
 TemperatureZero TempZero = TemperatureZero();
 
@@ -57,89 +58,43 @@ void setup() {
 void loop() {
   if (rf95.available()) {
     String received_message = receivedMessage();
-  SerialUSB.println(received_message);
+    SerialUSB.println(received_message);
+    Packet received_packet = packetParser(received_message);
+    serialPrintPacket(received_packet);
+    if (received_packet.type == "p" && received_packet.nodeId == "1"){
+      String type = "s";
+      String packet_id = String(packet_counter++);
+      String sender_id = "None";
+      String node_id = "1";
+      String payload = "temp:" + String(average_temperature);
+      long time_stamp = millis();
+
+      Packet p = {type, packet_id, sender_id, node_id, payload, time_stamp};
+
+      String message_ready = packetSetup(p);
+
+      sendMessage(message_ready);
+    }
   }
-  
 }
 
 void sendMessage(String str) {
+  SerialUSB.println("sent reply");
   uint8_t data_array[str.length()];
   str.getBytes(data_array, sizeof(data_array));
   rf95.send(data_array, sizeof(data_array));
 }
 
-String getPacketId(int packetNum) {
-  if (isSuccesful) {
-    return SUCCESSFULL_CODE + String(packetNum);
-  } else {
-    return ERROR_CODE + String(packetNum);
-  }
-}
-
 String receivedMessage() {
-  
-    // Should be a message for us now
-    uint8_t buf[RH_RF95_MAX_MESSAGE_LEN];
-    uint8_t len = sizeof(buf);
-    if (rf95.recv(buf, &len)) {
-      String message = ((char*)buf);
-      return message;
-    } else
-      SerialUSB.println("Recieve failed");
-}
 
-// TODO: calculate average temp
-// float getAverageTemperature() {
-//   float sumTemp = 0.0;
-//   float t = ge;
-//   sumTemp = sumTemp + t;
-//   return sumTemp;
-// }
-
-void setTimerFrequency(int frequencyHz) {
-  int compareValue = (CPU_HZ / (TIMER_PRESCALER_DIV * frequencyHz)) - 1;
-  TcCount16* TC = (TcCount16*)TC4;
-  TC->COUNT.reg = map(TC->COUNT.reg, 0, TC->CC[0].reg, 0, compareValue);
-  TC->CC[0].reg = compareValue;
-  while (TC->STATUS.bit.SYNCBUSY == 1)
-    ;
-  SerialUSB.print("COUNT: ");
-  SerialUSB.println(TC->COUNT.reg);
-  while (TC->STATUS.bit.SYNCBUSY == 1)
-    ;
-  SerialUSB.print("CC[0]: ");
-  SerialUSB.println(TC->CC[0].reg);
-}
-
-void startTimer(int frequencyHz) {
-  REG_GCLK_CLKCTRL = (uint16_t)(GCLK_CLKCTRL_CLKEN | GCLK_CLKCTRL_GEN_GCLK0 | GCLK_CLKCTRL_ID_TC4_TC5);
-  while (GCLK->STATUS.bit.SYNCBUSY == 1)
-    ;  // wait for sync
-
-  TcCount16* TC = (TcCount16*)TC4;
-
-  TC->CTRLA.reg &= ~TC_CTRLA_ENABLE;  //Disable timer
-  while (TC->STATUS.bit.SYNCBUSY == 1)
-    ;  // wait for sync
-
-  // Use the 16-bit timer
-  // Use match mode so that the timer counter resets when the count matches the compare register
-  // Set prescaler to 1024
-  TC->CTRLA.reg |= TC_CTRLA_MODE_COUNT16 | TC_CTRLA_WAVEGEN_MFRQ | TC_CTRLA_PRESCALER_DIV1024;
-  while (TC->STATUS.bit.SYNCBUSY == 1)
-    ;  // wait for sync
-
-  setTimerFrequency(frequencyHz);
-
-  // Enable the compare interrupt
-  TC->INTENSET.reg = 0;
-  TC->INTENSET.bit.MC0 = 1;
-
-  NVIC_EnableIRQ(TC4_IRQn);
-
-  TC->CTRLA.reg |= TC_CTRLA_ENABLE;
-  while (TC->STATUS.bit.SYNCBUSY == 1)
-    ;  // wait for sync
+  // Should be a message for us now
+  uint8_t buf[RH_RF95_MAX_MESSAGE_LEN];
+  uint8_t len = sizeof(buf);
+  if (rf95.recv(buf, &len)) {
+    String message = ((char*)buf);
+    return message;
+  } else
+    SerialUSB.println("Recieve failed");
 }
 
 void TC4_Handler() {
@@ -148,31 +103,17 @@ void TC4_Handler() {
   // we toggle the LED.
   if (TC->INTFLAG.bit.MC0 == 1) {
     TC->INTFLAG.bit.MC0 = 1;
+    // TODO: calulate the average temp
     float t = TempZero.readInternalTemperature();
-    sumTemp = sumTemp + t;
-    tempCounter++;
-    SerialUSB.println(String(tempCounter) + " temperature = " + String(t));
-    if (tempCounter == 5) {
-      rf95.setTxPower(20, false);
-      float averageTemp = sumTemp / 5.0;
-
-      packet_counter++;
-      float temperature = TempZero.readInternalTemperature();
-      String packet_id = getPacketId(packet_counter);
-      unsigned long time_stamp = millis();
-
-      TemperaturePacket p = { packet_id, NODE_ID, temperature, time_stamp };
-
-      String message = packetSetup(p);
-
-      sendMessage(message);
-
-      SerialUSB.println(message);
-
-
-      SerialUSB.println("succesfull");
-      sumTemp = 0.0;
-      tempCounter = 0;
+    data[dataIndex] = t;
+    dataIndex = (dataIndex + 1) % windowSize;
+    float sum = 0;
+    for (int i = 0; i < windowSize; i++){
+      sum += data[i];
+    }
+    average_temperature = sum / windowSize;
+    SerialUSB.print("average: = ");
+    SerialUSB.println(average_temperature);
+    
     }
   }
-}

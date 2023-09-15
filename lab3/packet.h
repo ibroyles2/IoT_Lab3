@@ -8,24 +8,34 @@ enum ErrorCode {
   RECEPTION_FAIL = 2
 };
 
+struct Packet {
+  String type;
+  String packetId;
+  String senderId;
+  String nodeId;
+  String payload;
+  long timeStamp;
+};
+
 struct ErrorPacket {
   String packetId;
-  String nodeId;
+  int nodeId;
   ErrorCode errCode;
   unsigned long timeStamp;
 };
 
 struct TemperaturePacket {
   String packetId;
-  String nodeId;
+  int nodeId;
   float temp;
   unsigned long timeStamp;
 };
+Packet packetParser(String str);
 
-String packetSetup(TemperaturePacket p);
+String packetSetup(Packet p);
 
-TemperaturePacket packetParser(String str);
+TemperaturePacket tempPacketParser(String str);
 
-void serialPrintPacket(TemperaturePacket p);
+void serialPrintPacket(Packet p);
 
 #endif
